@@ -170,7 +170,10 @@ class SchemaVisitor(object):
 
         # Check if the schema is already imported before based on the
         # namespace. Schema's without namespace are registered as 'None'
-        document = self.schema._get_schema_document(namespace, location)
+        if namespace != location:
+            document = self.schema._get_schema_document(namespace, location)
+        else:
+            document = self.schema._get_schema_documents(namespace)[0]
         if document:
             logger.debug("Returning existing schema: %r", location)
             self.register_import(namespace, document)
