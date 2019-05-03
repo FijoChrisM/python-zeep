@@ -12,6 +12,7 @@ from zeep.wsdl import definitions
 NSMAP = {
     'wsdl': 'http://schemas.xmlsoap.org/wsdl/',
     'wsaw': 'http://www.w3.org/2006/05/addressing/wsdl',
+    'wsam': 'http://www.w3.org/2007/05/addressing/metadata',
 }
 
 
@@ -39,8 +40,8 @@ def parse_abstract_message(wsdl, xmlelement):
 
     for part in xmlelement.findall('wsdl:part', namespaces=NSMAP):
         part_name = part.get('name')
-        part_element = qname_attr(part, 'element', tns)
-        part_type = qname_attr(part, 'type', tns)
+        part_element = qname_attr(part, 'element')
+        part_type = qname_attr(part, 'type')
 
         try:
             if part_element is not None:
@@ -97,7 +98,7 @@ def parse_abstract_operation(wsdl, xmlelement):
         'fault_messages': {}
     }
 
-    for msg_node in xmlelement.getchildren():
+    for msg_node in xmlelement:
         tag_name = etree.QName(msg_node.tag).localname
         if tag_name not in ('input', 'output', 'fault'):
             continue
@@ -118,7 +119,9 @@ def parse_abstract_operation(wsdl, xmlelement):
         else:
             kwargs['fault_messages'][param_name] = param_value
 
-        wsa_action = msg_node.get(etree.QName(NSMAP['wsaw'], 'Action'))
+        wsa_action = msg_node.get(etree.QName(NSMAP['wsam'], 'Action'))
+        if not wsa_action:
+            wsa_action = msg_node.get(etree.QName(NSMAP['wsaw'], 'Action'))
         param_value.wsa_action = wsa_action
 
     kwargs['name'] = name

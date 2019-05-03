@@ -14,6 +14,9 @@ class AsyncSoapBinding(object):
         response = await client.transport.post_xml(
             options['address'], envelope, http_headers)
 
+        if client.settings.raw_response:
+            return response 
+     
         operation_obj = self.get(operation)
         return self.process_reply(client, operation_obj, response)
 

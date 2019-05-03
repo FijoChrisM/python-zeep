@@ -1,5 +1,6 @@
 import io
 
+from defusedxml import EntitiesForbidden, DTDForbidden
 import pytest
 import requests_mock
 from lxml import etree
@@ -7,7 +8,7 @@ from pretend import stub
 from six import StringIO
 
 from tests.utils import DummyTransport, assert_nodes_equal
-from zeep import Client, wsdl
+from zeep import Client, wsdl, Settings
 from zeep.transports import Transport
 
 
@@ -901,3 +902,364 @@ def test_wsdl_duplicate_tns(recwarn):
     transport.bind('http://tests.python-zeep.org/schema-2.wsdl', wsdl_2)
     document = wsdl.Document(wsdl_main, transport)
     document.dump()
+
+
+def test_wsdl_dtd_entities_rules():
+    wsdl_declaration = u"""<!DOCTYPE Author [
+        <!ENTITY writer "Donald Duck.">
+        ]>
+        <wsdl:definitions
+        xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+        xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+        xmlns:tns="http://tests.python-zeep.org/xsd-main"
+        xmlns:mine="http://tests.python-zeep.org/xsd-secondary"
+        xmlns:wsdlsoap="http://schemas.xmlsoap.org/wsdl/soap/"
+        targetNamespace="http://tests.python-zeep.org/xsd-main">
+        <wsdl:types>
+          <xsd:schema
+              targetNamespace="http://tests.python-zeep.org/xsd-main"
+              xmlns:tns="http://tests.python-zeep.org/xsd-main">
+            <xsd:element name="input" type="xsd:string"/>
+          </xsd:schema>
+        </wsdl:types>
+        <wsdl:message name="message-1">
+          <wsdl:part name="response" element="tns:input"/>
+        </wsdl:message>
+        <wsdl:portType name="TestPortType">
+          <wsdl:operation name="TestOperation1">
+            <wsdl:input message="message-1"/>
+          </wsdl:operation>
+        </wsdl:portType>
+        </wsdl:definitions>
+    """.strip()
+
+    transport = DummyTransport()
+    transport.bind('http://tests.python-zeep.org/schema-2.wsdl', wsdl_declaration)
+
+    with pytest.raises(DTDForbidden):
+        wsdl.Document(
+            StringIO(wsdl_declaration), transport,
+            settings=Settings(forbid_dtd=True))
+
+    with pytest.raises(EntitiesForbidden):
+        wsdl.Document(StringIO(wsdl_declaration), transport)
+
+    document = wsdl.Document(
+        StringIO(wsdl_declaration), transport,
+        settings=Settings(forbid_entities=False))
+    document.dump()
+
+
+def test_extra_http_headers(recwarn, monkeypatch):
+
+    wsdl_main = StringIO("""
+        <?xml version="1.0"?>
+        <wsdl:definitions
+          xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          xmlns:tns="http://tests.python-zeep.org/xsd-main"
+          xmlns:sec="http://tests.python-zeep.org/wsdl-secondary"
+          xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap12/"
+          xmlns:wsdlsoap="http://schemas.xmlsoap.org/wsdl/soap12/"
+          targetNamespace="http://tests.python-zeep.org/xsd-main">
+          <wsdl:types>
+            <xsd:schema
+                targetNamespace="http://tests.python-zeep.org/xsd-main"
+                xmlns:tns="http://tests.python-zeep.org/xsd-main">
+              <xsd:element name="input" type="xsd:string"/>
+              <xsd:element name="input2" type="xsd:string"/>
+            </xsd:schema>
+          </wsdl:types>
+
+          <wsdl:message name="dummyRequest">
+            <wsdl:part name="response" element="tns:input"/>
+          </wsdl:message>
+          <wsdl:message name="dummyResponse">
+            <wsdl:part name="response" element="tns:input2"/>
+          </wsdl:message>
+
+          <wsdl:portType name="TestPortType">
+            <wsdl:operation name="TestOperation1">
+              <wsdl:input message="dummyRequest"/>
+              <wsdl:output message="dummyResponse"/>
+            </wsdl:operation>
+          </wsdl:portType>
+
+          <wsdl:binding name="TestBinding" type="tns:TestPortType">
+            <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <wsdl:operation name="TestOperation1">
+              <soap:operation soapAction="urn:dummyRequest"/>
+              <wsdl:input>
+                <soap:body use="literal"/>
+              </wsdl:input>
+              <wsdl:output>
+                <soap:body use="literal"/>
+              </wsdl:output>
+            </wsdl:operation>
+          </wsdl:binding>
+          <wsdl:service name="TestService">
+            <wsdl:documentation>Test service</wsdl:documentation>
+            <wsdl:port name="TestPortType" binding="tns:TestBinding">
+              <soap:address location="http://tests.python-zeep.org/test"/>
+            </wsdl:port>
+          </wsdl:service>
+        </wsdl:definitions>
+    """.strip())
+
+    client = stub(settings=Settings(), plugins=[], wsse=None)
+
+    transport = DummyTransport()
+    doc = wsdl.Document(wsdl_main, transport, settings=client.settings)
+    binding = doc.services.get('TestService').ports.get('TestPortType').binding
+
+    headers = {
+        'Authorization': 'Bearer 1234'
+    }
+    with client.settings(extra_http_headers=headers):
+        envelope, headers = binding._create(
+            'TestOperation1',
+            args=['foo'],
+            kwargs={},
+            client=client,
+            options={'address': 'http://tests.python-zeep.org/test'})
+
+    expected = """
+        <soap-env:Envelope xmlns:soap-env="http://www.w3.org/2003/05/soap-envelope">
+          <soap-env:Body>
+            <ns0:input xmlns:ns0="http://tests.python-zeep.org/xsd-main">foo</ns0:input>
+          </soap-env:Body>
+        </soap-env:Envelope>
+    """
+    assert_nodes_equal(expected, envelope)
+
+    assert headers['Authorization'] == 'Bearer 1234'
+
+
+def test_wsdl_no_schema_namespace():
+    wsdl_main = StringIO("""
+        <wsdl:definitions
+            xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+            xmlns:tns="http://Example.org"
+            xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+            targetNamespace="http://Example.org"
+            xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/">
+          <wsdl:types>
+            <xsd:schema elementFormDefault="qualified" >
+              <xsd:element name="AddResponse">
+                <xsd:complexType>
+                    <xsd:sequence>
+                    <xsd:element minOccurs="0" maxOccurs="1" ref="demo" />
+                    </xsd:sequence>
+                </xsd:complexType>
+              </xsd:element>
+              <xsd:element name="Add">
+                <xsd:complexType>
+                  <xsd:sequence>
+                    <xsd:element minOccurs="1" name="a" type="xsd:int" />
+                    <xsd:element minOccurs="1" name="b" type="xsd:int" />
+                  </xsd:sequence>
+                </xsd:complexType>
+              </xsd:element>
+              <xsd:element name="AddResponse">
+                <xsd:complexType>
+                  <xsd:sequence>
+                    <xsd:element minOccurs="0" name="result" type="xsd:int" />
+                  </xsd:sequence>
+                </xsd:complexType>
+              </xsd:element>
+            </xsd:schema>
+            <xsd:schema elementFormDefault="qualified" >
+              <xsd:element name="demo">
+              </xsd:element>
+            </xsd:schema>
+          </wsdl:types>
+          <wsdl:message name="ICalculator_Add_InputMessage">
+            <wsdl:part name="parameters" element="Add" />
+          </wsdl:message>
+          <wsdl:message name="ICalculator_Add_OutputMessage">
+            <wsdl:part name="parameters" element="AddResponse" />
+          </wsdl:message>
+          <wsdl:portType name="ICalculator">
+            <wsdl:operation name="Add">
+              <wsdl:input message="tns:ICalculator_Add_InputMessage" />
+              <wsdl:output message="tns:ICalculator_Add_OutputMessage" />
+            </wsdl:operation>
+          </wsdl:portType>
+          <wsdl:binding name="DefaultBinding_ICalculator" type="tns:ICalculator">
+            <soap:binding transport="http://schemas.xmlsoap.org/soap/http" />
+            <wsdl:operation name="Add">
+              <soap:operation soapAction="http://Example.org/ICalculator/Add" style="document" />
+              <wsdl:input>
+                <soap:body use="literal" />
+              </wsdl:input>
+              <wsdl:output>
+                <soap:body use="literal" />
+              </wsdl:output>
+            </wsdl:operation>
+          </wsdl:binding>
+          <wsdl:service name="CalculatorService">
+            <wsdl:port name="ICalculator" binding="tns:DefaultBinding_ICalculator">
+              <soap:address location="http://Example.org/ICalculator" />
+            </wsdl:port>
+          </wsdl:service>
+        </wsdl:definitions>
+    """)
+    client = stub(settings=Settings(), plugins=[], wsse=None)
+
+    transport = DummyTransport()
+    document = wsdl.Document(wsdl_main, transport)
+    binding = document.services.get('CalculatorService').ports.get('ICalculator').binding
+
+    envelope, headers = binding._create(
+        'Add',
+        args=[3, 4],
+        kwargs={},
+        client=client,
+        options={'address': 'http://tests.python-zeep.org/test'})
+
+    expected = """
+        <soap-env:Envelope xmlns:soap-env="http://schemas.xmlsoap.org/soap/envelope/">
+          <soap-env:Body>
+            <Add>
+                <a>3</a>
+                <b>4</b>
+            </Add>
+          </soap-env:Body>
+        </soap-env:Envelope>
+    """
+    assert_nodes_equal(expected, envelope)
+
+
+def test_namespaced_wsdl_with_empty_import():
+    # See https://www.w3.org/TR/2012/REC-xmlschema11-1-20120405/#src-resolve for details
+    wsdl_main = StringIO("""
+        <wsdl:definitions xmlns:s="http://www.w3.org/2001/XMLSchema" targetNamespace="weird_wsdl" xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/">
+        <wsdl:types>
+            <s:schema elementFormDefault="qualified" targetNamespace="weird_wsdl">
+                <s:import />
+                <s:element name="GetVTInfoResponse">
+                    <s:complexType>
+                    <s:sequence>
+                        <s:element minOccurs="0" maxOccurs="1" ref="GetVTInfoResult" />
+                    </s:sequence>
+                    </s:complexType>
+                </s:element>
+            </s:schema>
+            <s:schema elementFormDefault="qualified">
+                <s:element name="GetVTInfoResult" />
+            </s:schema>
+        </wsdl:types>
+        </wsdl:definitions>
+    """)
+
+    transport = DummyTransport()
+    document = wsdl.Document(wsdl_main, transport)
+    document.dump()
+
+
+def test_import_cyclic():
+    node_a = etree.fromstring("""
+        <?xml version="1.0"?>
+        <xs:schema
+            xmlns:xs="http://www.w3.org/2001/XMLSchema"
+            xmlns:tns="http://tests.python-zeep.org/a"
+            targetNamespace="http://tests.python-zeep.org/a"
+            xmlns:b="http://tests.python-zeep.org/b"
+            elementFormDefault="qualified">
+
+            <xs:import
+                schemaLocation="http://tests.python-zeep.org/b.xsd"
+                namespace="http://tests.python-zeep.org/b"/>
+
+        </xs:schema>
+    """.strip())
+
+    node_b = etree.fromstring("""
+        <?xml version="1.0"?>
+        <xs:schema
+            xmlns:xs="http://www.w3.org/2001/XMLSchema"
+            xmlns:tns="http://tests.python-zeep.org/b"
+            targetNamespace="http://tests.python-zeep.org/b"
+            elementFormDefault="qualified">
+
+            <xs:import
+                schemaLocation="http://tests.python-zeep.org/a.xsd"
+                namespace="http://tests.python-zeep.org/a"/>
+            <xs:element name="bar" type="xs:string"/>
+        </xs:schema>
+    """.strip())
+
+    wsdl_content = StringIO("""
+    <?xml version='1.0'?>
+    <definitions
+        xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+        xmlns:tns="http://tests.python-zeep.org/root"
+        xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+        xmlns="http://schemas.xmlsoap.org/wsdl/" targetNamespace="http://tests.python-zeep.org/root" name="root">
+        <types>
+          <xsd:schema
+              xmlns:xs="http://www.w3.org/2001/XMLSchema"
+              xmlns:tns="http://tests.python-zeep.org/b"
+              targetNamespace="http://tests.python-zeep.org/b"
+              elementFormDefault="qualified">
+
+              <xs:import
+                  schemaLocation="http://tests.python-zeep.org/a.xsd"
+                  namespace="http://tests.python-zeep.org/a"/>
+              <xs:import
+                  schemaLocation="http://tests.python-zeep.org/b.xsd"
+                  namespace="http://tests.python-zeep.org/b"/>
+
+              <xs:element name="foo" type="xs:string"/>
+          </xsd:schema>
+        </types>
+    </definitions>
+    """.strip())
+
+    transport = DummyTransport()
+    transport.bind('https://tests.python-zeep.org/a.xsd', node_a)
+    transport.bind('https://tests.python-zeep.org/b.xsd', node_b)
+
+    document = wsdl.Document(
+        wsdl_content, transport, 'https://tests.python-zeep.org/content.wsdl')
+
+
+def test_import_no_location():
+    node_a = etree.fromstring("""
+        <?xml version="1.0"?>
+        <xs:schema
+            xmlns:xs="http://www.w3.org/2001/XMLSchema"
+            xmlns:tns="http://tests.python-zeep.org/a"
+            targetNamespace="http://tests.python-zeep.org/a"
+            xmlns:b="http://tests.python-zeep.org/b"
+            elementFormDefault="qualified">
+
+        </xs:schema>
+    """.strip())
+
+    wsdl_content = StringIO("""
+    <?xml version='1.0'?>
+    <definitions
+        xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+        xmlns:tns="http://tests.python-zeep.org/root"
+        xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+        xmlns="http://schemas.xmlsoap.org/wsdl/" targetNamespace="http://tests.python-zeep.org/root" name="root">
+        <types>
+          <xsd:schema
+              xmlns:xs="http://www.w3.org/2001/XMLSchema"
+              xmlns:tns="http://tests.python-zeep.org/b"
+              targetNamespace="http://tests.python-zeep.org/b"
+              elementFormDefault="qualified">
+
+              <xs:import namespace="http://tests.python-zeep.org/a"/>
+              <xs:element name="foo" type="xs:string"/>
+          </xsd:schema>
+        </types>
+    </definitions>
+    """.strip())
+
+    transport = DummyTransport()
+    transport.bind('https://tests.python-zeep.org/a.xsd', node_a)
+
+    document = wsdl.Document(
+        wsdl_content, transport, 'https://tests.python-zeep.org/content.wsdl')

@@ -426,7 +426,10 @@ class Choice(OrderIndicator):
                             result.append(choice_value)
                             break
                     else:
-                        if element.name in value:
+                        if isinstance(element, Any):
+                            result.append(value)
+                            break
+                        elif element.name in value:
                             choice_value = value.get(element.name)
                             result.append({element.name: choice_value})
                             break
@@ -539,7 +542,7 @@ class Choice(OrderIndicator):
                 if name is not None:
                     try:
                         choice_value = value[name]
-                    except KeyError:
+                    except (KeyError, TypeError):
                         choice_value = value
                 else:
                     choice_value = value
@@ -599,7 +602,7 @@ class Sequence(OrderIndicator):
                     item_subresult = element.parse_xmlelements(
                         xmlelements, schema, name, context=context)
                 except UnexpectedElementError:
-                    if schema.strict:
+                    if schema.settings.strict:
                         raise
                     item_subresult = None
 

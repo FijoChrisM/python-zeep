@@ -1,8 +1,8 @@
-from lxml import etree
 import pytest
+from lxml import etree
 
 from tests.utils import assert_nodes_equal, load_xml, render_node
-from zeep import xsd
+from zeep import exceptions, xsd
 
 
 def test_xml_xml_single_node():
@@ -279,7 +279,7 @@ def test_xml_unparsed_elements():
           </element>
         </schema>
     """))
-    schema.strict = False
+    schema.settings.strict = False
     schema.set_ns_prefix('tns', 'http://tests.python-zeep.org/')
 
     expected = load_xml("""
@@ -295,3 +295,91 @@ def test_xml_unparsed_elements():
     obj = container_elm.parse(expected[0], schema)
     assert obj.item == 'bar'
     assert obj._raw_elements
+
+
+def test_xml_simple_content_nil():
+    schema = xsd.Schema(load_xml("""
+    <?xml version="1.0"?>
+    <schema xmlns="http://www.w3.org/2001/XMLSchema"
+            xmlns:tns="http://tests.python-zeep.org/"
+            targetNamespace="http://tests.python-zeep.org/"
+            elementFormDefault="qualified">
+      <element name="container" nillable="true">
+        <complexType>
+          <simpleContent>
+              <restriction base="string">
+                <maxLength value="1000"/>
+              </restriction>
+          </simpleContent>
+        </complexType>
+      </element>
+    </schema>
+    """))
+    schema.set_ns_prefix('tns', 'http://tests.python-zeep.org/')
+    container_elm = schema.get_element('tns:container')
+    obj = container_elm(xsd.Nil)
+    result = render_node(container_elm, obj)
+
+    expected = """
+      <document>
+        <ns0:container xmlns:ns0="http://tests.python-zeep.org/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:nil="true" />
+      </document>
+    """
+    result = render_node(container_elm, obj)
+    assert_nodes_equal(result, expected)
+
+    obj = container_elm.parse(result[0], schema)
+    assert obj._value_1 is None
+
+
+def test_ignore_sequence_order():
+    schema_doc = load_xml(b"""
+        <?xml version="1.0" encoding="utf-8"?>
+        <xsd:schema xmlns:tns="http://tests.python-zeep.org/attr"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+          elementFormDefault="qualified"
+          targetNamespace="http://tests.python-zeep.org/attr">
+          <xsd:complexType name="Result">
+            <xsd:attribute name="id" type="xsd:int" use="required"/>
+          </xsd:complexType>
+          <xsd:element name="Response">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element minOccurs="0" maxOccurs="1" name="Foo" type="tns:Result"/>
+                <xsd:element minOccurs="0" maxOccurs="1" name="Bar" type="tns:Result"/>
+                <xsd:element minOccurs="0" maxOccurs="1" name="Baz" type="tns:Result"/>
+              </xsd:sequence>
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:schema>
+    """)
+
+    response_doc = load_xml(b"""
+        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+          <s:Body xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+            <Response xmlns="http://tests.python-zeep.org/attr">
+                <Foo id="1"/>
+                <Baz id="3"/>
+                <Bar id="2"/>
+            </Response>
+          </s:Body>
+        </s:Envelope>
+    """)
+
+    schema = xsd.Schema(schema_doc)
+    elm = schema.get_element('{http://tests.python-zeep.org/attr}Response')
+    schema.settings.xsd_ignore_sequence_order = False
+
+    node = response_doc.xpath(
+        '//ns0:Response', namespaces={
+            'xsd': 'http://www.w3.org/2001/XMLSchema',
+            'ns0': 'http://tests.python-zeep.org/attr',
+        })
+    with pytest.raises(exceptions.XMLParseError) as exc:
+        response = elm.parse(node[0], schema)
+    assert str(exc) is not None
+
+    schema.settings.xsd_ignore_sequence_order = True
+
+    response = elm.parse(node[0], schema)
+    assert response.Baz.id == 3

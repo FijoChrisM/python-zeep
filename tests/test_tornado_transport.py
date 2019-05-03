@@ -1,12 +1,28 @@
 import pytest
-from pretend import stub
 from lxml import etree
-from tornado.httpclient import HTTPResponse, HTTPRequest
-from tornado.testing import gen_test, AsyncTestCase
-from tornado.concurrent import Future
-
 from mock import patch
+from pretend import stub
+from tornado.concurrent import Future
+from tornado.httpclient import HTTPRequest, HTTPResponse
+from tornado.testing import AsyncTestCase, gen_test
+
 from zeep.tornado import TornadoAsyncTransport
+
+
+@pytest.mark.requests
+@patch('tornado.httpclient.HTTPClient.fetch')
+def test_tornado_load(mock_httpclient_fetch):
+    cache = stub(get=lambda url: None, add=lambda url, content: None)
+    response = HTTPResponse(HTTPRequest('http://tests.python-zeep.org/test.xml'), 200)
+    response.buffer = True
+    response._body = 'x'
+    mock_httpclient_fetch.return_value = response
+
+    transport = TornadoAsyncTransport(cache=cache)
+
+    result = transport.load('http://tests.python-zeep.org/test.xml')
+
+    assert result == 'x'
 
 
 class TornadoAsyncTransportTest(AsyncTestCase):
@@ -14,22 +30,6 @@ class TornadoAsyncTransportTest(AsyncTestCase):
     def test_no_cache(self):
         transport = TornadoAsyncTransport()
         assert transport.cache is None
-
-    @pytest.mark.requests
-    @patch('tornado.httpclient.HTTPClient.fetch')
-    @gen_test
-    def test_load(self, mock_httpclient_fetch):
-        cache = stub(get=lambda url: None, add=lambda url, content: None)
-        response = HTTPResponse(HTTPRequest('http://tests.python-zeep.org/test.xml'), 200)
-        response.buffer = True
-        response._body = 'x'
-        mock_httpclient_fetch.return_value = response
-
-        transport = TornadoAsyncTransport(cache=cache)
-
-        result = transport.load('http://tests.python-zeep.org/test.xml')
-
-        assert result == 'x'
 
     @pytest.mark.requests
     @patch('tornado.httpclient.AsyncHTTPClient.fetch')
